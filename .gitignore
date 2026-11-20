@@ -1,0 +1,4 @@
+__pycache__
+.env
+translations.db
+app.log
