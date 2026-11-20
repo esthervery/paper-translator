@@ -3,5 +3,5 @@
   "temperature": null,
   "batch_max_chars": 3500,
   "batch_max_items": 40,
-  "pdf_zoom": 1.5
+  "pdf_zoom": 0.6
 }

@@ -14,8 +14,8 @@ CONFIG_PATH = APP_DIR / "config.json"
 ENV_PATH = APP_DIR / ".env"
 
 DEFAULTS = {
-    "model": "gpt-4o-mini",   # config.json에서 자유롭게 교체 가능
-    "temperature": 0.2,
+    "model": "gpt-6-luna",    # config.json에서 자유롭게 교체 가능
+    "temperature": None,      # None = API 기본값 사용
     "batch_max_chars": 3500,  # 한 번의 API 요청에 담을 문장 글자수 상한
     "batch_max_items": 40,    # 한 번의 API 요청에 담을 문장 개수 상한
     "pdf_zoom": 1.5,

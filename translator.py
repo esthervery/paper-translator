@@ -75,10 +75,11 @@ def translate_segments(segments, model, api_key, progress_cb=None,
         matched = None
         for attempt in range(max_retries + 1):
             try:
+                kw = {"model": model, "response_format": {"type": "json_object"}}
+                if cfg.get("temperature") is not None:
+                    kw["temperature"] = cfg["temperature"]   # null이면 API 기본값
                 resp = client.chat.completions.create(
-                    model=model,
-                    temperature=cfg["temperature"],
-                    response_format={"type": "json_object"},
+                    **kw,
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user",
