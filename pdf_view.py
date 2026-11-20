@@ -1,58 +1,100 @@
-"""왼쪽 PDF 뷰어.
+"""PDF 논문 한글 번역 뷰어의 왼쪽 뷰어.
 
-- 모든 페이지를 QGraphicsScene에 세로로 쌓아 렌더링
+- 모든 페이지를 QGraphicsScene에 세로로 쌓아 렌더링, 여백은 아이보리
 - 하이라이트: hover(임시, 연한 노랑) + 클릭 고정(핀, 진한 노랑) — 동시 최대 2개
-- 모드: 커서(기본) / 메모(여백 클릭 생성) / 형광펜(드래그) / 지우개 / 중요표시
-- 메모·형광펜·중요표시는 PDF 페이지 좌표 기준으로 저장 -> 확대/축소에도 위치 유지
+- 메모: 여백 클릭 → 포스트잇이 바로 생기고 그 자리에서 작성.
+  크기·위치는 PDF 좌표(비율) 기준이라 확대/축소해도 유지된다.
+- 형광펜 4색 / 지우개 / 중요 페이지 별표
 """
 import fitz
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QPainter, QPen,
-                           QPixmap, QPolygonF)
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QPainter,
+                           QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import (QGraphicsPathItem, QGraphicsRectItem,
                                QGraphicsScene, QGraphicsTextItem, QGraphicsView,
                                QMenu)
 
-HL_FILL = QColor(255, 235, 59, 95)    # hover용 연한 노랑
+IVORY = QColor(244, 239, 228)          # 여백(아이보리, 완전 흰색 아님)
+HL_FILL = QColor(255, 235, 59, 95)     # hover용 연한 노랑
 HL_PEN = QColor(245, 180, 0, 230)
-PIN_FILL = QColor(255, 202, 40, 130)  # 핀용 진한 노랑
+PIN_FILL = QColor(255, 202, 40, 130)   # 핀용 진한 노랑
 PIN_PEN = QColor(225, 140, 0, 255)
 
-PEN_COLORS = {  # 형광펜 색상 (이름 -> RGB)
+PEN_COLORS = {                          # 형광펜 색상
     "노랑": (255, 238, 88), "초록": (167, 255, 117),
     "분홍": (255, 138, 180), "파랑": (130, 200, 255),
 }
-KIND = 0  # item data role: ("stroke", id) / ("badge", page)
+KIND = 0                # item data role: ("stroke", id) / ("badge", page)
+NOTE_REF_W = 190        # 메모 폭 기준(장면 픽셀, REF_ZOOM일 때)
+NOTE_REF_H = 90
+REF_ZOOM = 1.5          # 메모 크기 기준 배율 — scale=zoom/REF_ZOOM으로 비율 유지
+
+
+class _MemoText(QGraphicsTextItem):
+    """포스트잇 본문. 편집 모드에서만 마우스/키를 받는다."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        f = QFont()
+        f.setPointSize(10)
+        self.setFont(f)
+        self.setPos(9, 7)
+        self.setTextWidth(NOTE_REF_W - 18)
+        self.setTextInteractionFlags(Qt.NoTextInteraction)
+
+    def start_edit(self):
+        self.setTextInteractionFlags(Qt.TextEditorInteraction)
+        self.setFocus()
+
+    def end_edit(self):
+        self.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.clearFocus()
+
+    def focusOutEvent(self, ev):
+        self.scene().views()[0].noteCommitted.emit(self.parentItem().note_id)
+        super().focusOutEvent(ev)
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape:                      # Esc = 작성 확정
+            self.end_edit()
+            self.scene().views()[0].noteCommitted.emit(self.parentItem().note_id)
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
 
 
 class NoteItem(QGraphicsRectItem):
-    """여백에 붙이는 메모지. 드래그로 이동, 더블클릭/우클릭으로 편집·삭제."""
+    """여백에 붙이는 포스트잇. 드래그로 이동, 더블클릭으로 편집, 우클릭 삭제."""
 
     def __init__(self, note_id, text, view):
-        super().__init__(0, 0, 190, 90)
+        super().__init__(0, 0, NOTE_REF_W, NOTE_REF_H)
         self.note_id = note_id
         self.view = view
         self.was_moved = False
         self.setFlags(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable
                       | QGraphicsRectItem.GraphicsItemFlag.ItemSendsGeometryChanges)
-        self.setBrush(QBrush(QColor(255, 236, 140, 242)))
-        self.setPen(QPen(QColor(230, 160, 0), 1.4))
+        self.setBrush(QBrush(QColor(255, 244, 176, 246)))
+        self.setPen(QPen(QColor(214, 158, 40), 1.4))
         self.setZValue(15)
-        self._text = QGraphicsTextItem(self)
-        f = QFont()
-        f.setPointSize(10)
-        self._text.setFont(f)
-        self._text.setPos(9, 7)
-        self._text.setTextWidth(172)
+        self._text = _MemoText(self)
         self.set_text(text)
 
     def set_text(self, text):
         self._text.setPlainText(text)
-        h = min(300, self._text.boundingRect().height() + 16)
-        self.setRect(0, 0, 190, h)
+        self._resize_to_text()
+
+    def _resize_to_text(self):
+        h = self._text.boundingRect().height() + 16
+        self.setRect(0, 0, NOTE_REF_W, max(NOTE_REF_H, min(420, h)))
 
     def text(self):
         return self._text.toPlainText()
+
+    def start_edit(self):
+        self._text.start_edit()
+
+    def end_edit(self):
+        self._text.end_edit()
 
     def itemChange(self, change, value):
         if change == QGraphicsRectItem.GraphicsItemChange.ItemPositionHasChanged:
@@ -60,8 +102,8 @@ class NoteItem(QGraphicsRectItem):
         return super().itemChange(change, value)
 
     def mouseDoubleClickEvent(self, ev):
-        self.view.noteEditRequested.emit(self.note_id)
-        super().mouseDoubleClickEvent(ev)
+        self.start_edit()
+        ev.accept()
 
     def contextMenuEvent(self, ev):
         m = QMenu()
@@ -69,7 +111,7 @@ class NoteItem(QGraphicsRectItem):
         a_del = m.addAction("메모 삭제")
         chosen = m.exec(ev.screenPos())
         if chosen == a_edit:
-            self.view.noteEditRequested.emit(self.note_id)
+            self.start_edit()
         elif chosen == a_del:
             self.view.remove_note(self.note_id)
             self.view.noteDeleted.emit(self.note_id)
@@ -80,11 +122,11 @@ class PdfView(QGraphicsView):
     segmentClicked = Signal(int)
     noteRequested = Signal(object)            # QPointF(장면 좌표)
     noteMoved = Signal(int)
-    noteEditRequested = Signal(int)
+    noteCommitted = Signal(int)               # 작성 확정(포커스 아웃/Esc)
     noteDeleted = Signal(int)
     strokeCompleted = Signal(int, str, list)  # page, color, [(x,y) 페이지 좌표]
     strokeDeleted = Signal(int)
-    bookmarkToggled = Signal(int, bool)       # page, 이제 중요표시인가
+    bookmarkToggled = Signal(int, bool)
 
     def __init__(self, zoom=1.5, parent=None):
         super().__init__(parent)
@@ -93,22 +135,22 @@ class PdfView(QGraphicsView):
         self.page_offsets = []
         self.page_sizes = []
         self._segments = []
-        self._hl_items = []     # hover용 (임시)
-        self._pin_items = []    # 클릭 고정용
+        self._hl_items = []     # hover용
+        self._pin_items = []    # 핀용
         self.mode = "cursor"
         self.pen_color = "노랑"
         self._cache = None
         self._fh = None
-        self._notes = {}        # note_id -> NoteItem
-        self._strokes = {}      # stroke_id -> QGraphicsPathItem
-        self._badges = {}       # page -> badge item
+        self._notes = {}
+        self._strokes = {}
+        self._badges = {}
         self._next_note_id = 1
         self._next_stroke_id = 1
-        self._pen_pts = None    # 드래그 중 임시 점들(장면 좌표)
+        self._pen_pts = None
         self._pen_item = None
         self.scene_ = QGraphicsScene(self)
         self.setScene(self.scene_)
-        self.setBackgroundBrush(QColor(72, 72, 72))
+        self.setBackgroundBrush(QBrush(IVORY))     # 여백 = 아이보리
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
@@ -124,7 +166,7 @@ class PdfView(QGraphicsView):
             self.zoom = zoom
         self.doc = fitz.open(str(path))
         self.page_offsets, self.page_sizes = [], []
-        z = self.zoom if self.doc.page_count <= 60 else min(self.zoom, 1.2)  # 메모리 보호
+        z = self.zoom if self.doc.page_count <= 60 else min(self.zoom, 1.2)
         self.zoom = z
         y = 0.0
         for page in self.doc:
@@ -141,7 +183,7 @@ class PdfView(QGraphicsView):
         self._cache, self._fh = cache_db, file_hash
 
     def _load_annotations(self):
-        """캐시에 저장된 메모/형광펜/중요표시를 다시 그린다(확대/축소 후 포함)."""
+        """저장된 메모/형광펜/중요표시를 현재 배율로 다시 그린다."""
         if not self._cache or not self._fh:
             return
         notes = self._cache.get_notes(self._fh)
@@ -177,13 +219,10 @@ class PdfView(QGraphicsView):
         """장면 좌표 -> (page, x_frac, y_frac). frac은 페이지 폭/높이 기준."""
         pno = self._page_nearest(scene_pos.y())
         w, h = self.page_sizes[pno]
-        x = scene_pos.x() / w
-        y = (scene_pos.y() - self.page_offsets[pno]) / h
-        return pno, x, y
+        return pno, scene_pos.x() / w, (scene_pos.y() - self.page_offsets[pno]) / h
 
     def _pos_of(self, pno, x_frac, y_frac):
         w, h = self.page_sizes[pno]
-        from PySide6.QtCore import QPointF
         return QPointF(x_frac * w, self.page_offsets[pno] + y_frac * h)
 
     # ---------- 하이라이트 ----------
@@ -214,7 +253,7 @@ class PdfView(QGraphicsView):
         self._hl_items = []
 
     def pin_highlight(self, page_rects):
-        """클릭으로 고정된 하이라이트. hover와 별개로 유지(최대 2개 동시 표시)."""
+        """클릭으로 고정된 하이라이트. hover와 별개 유지(최대 2개 동시 표시)."""
         self.clear_pin()
         first = None
         for pno, (x0, y0, x1, y1) in page_rects:
@@ -248,6 +287,7 @@ class PdfView(QGraphicsView):
     # ---------- 메모 ----------
     def _spawn_note(self, note_id, page, x_frac, y_frac, text):
         it = NoteItem(note_id, text, self)
+        it.setScale(self.zoom / REF_ZOOM)   # 크기도 배율에 비례 -> 확대/축소에 유지
         it.setPos(self._pos_of(page, x_frac, y_frac))
         self.scene_.addItem(it)
         self._notes[note_id] = it
@@ -260,6 +300,9 @@ class PdfView(QGraphicsView):
         self._spawn_note(nid, page, x, y, text)
         self.setSceneRect(self.scene_.itemsBoundingRect())
         return nid
+
+    def start_note_edit(self, note_id):
+        self._notes[note_id].start_edit()
 
     def note_anchor(self, note_id):
         it = self._notes[note_id]
@@ -281,14 +324,11 @@ class PdfView(QGraphicsView):
     # ---------- 형광펜 ----------
     def _draw_stroke(self, stroke_id, page, color, points):
         rgb = PEN_COLORS.get(color, PEN_COLORS["노랑"])
-        path = None
-        from PySide6.QtGui import QPainterPath
         pp = QPainterPath()
         for i, (x, y) in enumerate(points):
             sx, sy = x * self.zoom, self.page_offsets[page] + y * self.zoom
             (pp.moveTo(sx, sy) if i == 0 else pp.lineTo(sx, sy))
-        path = pp
-        it = QGraphicsPathItem(path)
+        it = QGraphicsPathItem(pp)
         it.setPen(QPen(QColor(*rgb, 110), 16, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         it.setZValue(9)
         it.setData(KIND, ("stroke", stroke_id))
@@ -303,8 +343,7 @@ class PdfView(QGraphicsView):
         return sid
 
     def _erase_at(self, scene_pos):
-        it = self.scene_.items(scene_pos)
-        for item in it:
+        for item in self.scene_.items(scene_pos):
             d = item.data(KIND)
             if d and d[0] == "stroke":
                 sid = d[1]
@@ -344,6 +383,8 @@ class PdfView(QGraphicsView):
     def set_mode(self, mode):
         self.mode = mode
         self._pen_pts, self._pen_item = None, None
+        for nid, n in self._notes.items():   # 모드 전환 시 작성 중인 메모 확정
+            n.end_edit()
         cur = {"cursor": Qt.ArrowCursor, "note": Qt.PointingHandCursor,
                "pen": Qt.CrossCursor, "erase": Qt.CrossCursor,
                "bookmark": Qt.PointingHandCursor}.get(mode, Qt.ArrowCursor)
@@ -358,13 +399,13 @@ class PdfView(QGraphicsView):
                     return
                 w = self.page_sizes[self._page_nearest(sp.y())][0]
                 on_page = self._page_at(sp.y()) is not None and 0 <= sp.x() <= w
-                if not on_page:   # 페이지 본문 위가 아니라 여백(회색)일 때만
+                if not on_page:   # 페이지 본문이 아니라 여백일 때만
                     self.noteRequested.emit(sp)
                 return
             if self.mode == "pen":
                 self._pen_pts = [sp]
-                self._pen_item = QGraphicsPathItem()
                 rgb = PEN_COLORS.get(self.pen_color, PEN_COLORS["노랑"])
+                self._pen_item = QGraphicsPathItem()
                 self._pen_item.setPen(QPen(QColor(*rgb, 110), 16, Qt.SolidLine,
                                            Qt.RoundCap, Qt.RoundJoin))
                 self._pen_item.setZValue(9)
@@ -376,7 +417,6 @@ class PdfView(QGraphicsView):
             if self.mode == "bookmark":
                 self.toggle_bookmark_page(self._page_nearest(sp.y()))
                 return
-            # 커서 모드: 문장 클릭
             pno = self._page_at(sp.y())
             if pno is not None:
                 px = sp.x() / self.zoom

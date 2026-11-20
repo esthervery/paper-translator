@@ -50,6 +50,12 @@ class Cache:
                 page INTEGER,
                 PRIMARY KEY(file_hash, page)
             );
+            CREATE TABLE IF NOT EXISTS summaries(
+                file_hash TEXT PRIMARY KEY,
+                text TEXT,
+                model TEXT,
+                created_at REAL
+            );
             CREATE TABLE IF NOT EXISTS segments(
                 file_hash TEXT,
                 sent_id INTEGER,
@@ -108,6 +114,20 @@ class Cache:
             (file_hash, len(segments), time.time()),
         )
         c.commit()
+
+    # --- 요약 ---
+    def get_summary(self, file_hash: str):
+        row = self.conn.execute(
+            "SELECT text FROM summaries WHERE file_hash=?", (file_hash,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def put_summary(self, file_hash: str, text: str, model: str):
+        import time as _time
+        self.conn.execute(
+            "INSERT OR REPLACE INTO summaries(file_hash,text,model,created_at) VALUES(?,?,?,?)",
+            (file_hash, text, model, _time.time()))
+        self.conn.commit()
 
     # --- 메모지 ---
     def get_notes(self, fh):

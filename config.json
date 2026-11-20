@@ -1,7 +1,8 @@
 {
   "model": "gpt-6-luna",
+  "summary_model": "gpt-6-luna",
   "temperature": null,
   "batch_max_chars": 3500,
   "batch_max_items": 40,
-  "pdf_zoom": 0.6
+  "pdf_zoom": 0.8
 }
